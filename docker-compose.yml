@@ -1,0 +1,23 @@
+version: '3'
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./logs:/app/logs
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+networks:
+  default:
+    driver: bridge
+
+volumes:
+  logs:
