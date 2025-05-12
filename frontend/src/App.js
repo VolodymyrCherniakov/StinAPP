@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import './App.css';
 
-const API_URL = 'http://localhost:8000';
+const API_URL = 'https://stinbackend-production.up.railway.app';
 
 function App() {
   const [stocks, setStocks] = useState({});
@@ -14,10 +14,19 @@ function App() {
   const [recommendMessage, setRecommendMessage] = useState('');
 
   const [newsUrl, setNewsUrl] = useState('');
-  const [minRating, setMinRating] = useState(-5);
+  const [minRating, setMinRating] = useState(() => {
+    // Check if there's a saved value in localStorage
+    const savedMinRating = localStorage.getItem('minRating');
+    return savedMinRating ? parseInt(savedMinRating, 10) : 0; // Default to 0 if not found
+  });
   const [newsData, setNewsData] = useState([]);
   const [newsError, setNewsError] = useState('');
   const [newsLoading, setNewsLoading] = useState(false);
+
+  // Save the minRating to localStorage whenever it changes
+  useEffect(() => {
+    localStorage.setItem('minRating', minRating);
+  }, [minRating]);
 
   const handleAddTicker = () => {
     if (!newTicker) return;
@@ -103,11 +112,11 @@ function App() {
     setNewsData([]);
 
     try {
-      const res = await fetch('/api/news', {
+      const res = await fetch(API_URL + '/api/news', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          api_url: 'https://news-production-257a.up.railway.app/news/recommend',
+          api_url: 'https://news-production-257a.up.railway.app/liststock',
           min_rating_for_sell: minRating
         })
       });
@@ -140,6 +149,7 @@ function App() {
       .finally(() => {
         setLoading(false);
       });
+    handleSendNews();
   }, []);
 
   if (loading) return <div className="App"><p>🔄 Načítání dat...</p></div>;
@@ -154,7 +164,7 @@ function App() {
         <div style={{ marginBottom: '20px' }}>
           <input
             type="text"
-            placeholder="Zadejte ticker (např. AAPL)"
+            placeholder="Zadejte ticker (např. AAPL, MSFT, TSLA)"
             value={newTicker}
             onChange={(e) => setNewTicker(e.target.value.toUpperCase())}
             disabled={adding}
@@ -216,16 +226,18 @@ function App() {
           </div>
         </div>
         <div style={{ marginBottom: '1rem' }}>
-        <label htmlFor="minRating">Minimální rating pro SELL:</label>
+          <label htmlFor="minRating">Minimální rating pro SELL:</label>
           <input
             type="number"
             id="minRating"
             value={minRating}
             onChange={(e) => {
-              let value = parseInt(e.target.value);
-              // Omezíme hodnotu mezi -10 a 10
-              if (value < -10) value = -10;
-              if (value > 10) value = 10;
+              let value = parseInt(e.target.value, 10);
+              if (isNaN(value)) {
+                setMinRating(0); // Nastavíme výchozí hodnotu na 0, místo prázdného řetězce
+                return;
+              }
+              value = Math.max(-10, Math.min(10, value));
               setMinRating(value);
             }}
             style={{ marginLeft: '0.5rem', width: '60px' }}
@@ -234,13 +246,13 @@ function App() {
           />
         </div>
         <button style={{ marginTop: 10 }} onClick={handleSendNews} disabled={newsLoading}>
-          {newsLoading ? 'Zpracovávám...' : 'Odeslat a vyhodnotit zprávy'}
+          {newsLoading ? 'Zpracovávám...' : 'Obnovit minimalní rating pro SELL'}
         </button>
         {newsError && <div style={{ color: 'red', marginTop: 10 }}>{newsError}</div>}
 
         {newsData.length > 0 && (
           <div style={{ marginTop: 20 }}>
-            <h3>📋 Výsledky zpracovaných zpráv</h3>
+            <h3>📋 Výsledky posledních zpráv</h3>
             <table style={{ width: '100%', marginTop: 10 }}>
               <thead>
                 <tr>
