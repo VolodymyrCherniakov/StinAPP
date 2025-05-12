@@ -1,0 +1,53 @@
+services:
+  backend:
+    container_name: backend
+    build: ./backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app       # zdrojový kód
+      - ./logs:/app/logs     # logy
+    env_file:
+      - .env
+    networks:
+      - app_network
+    restart: always
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/api/hello').raise_for_status()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    container_name: frontend
+    build: ./frontend
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - app_network
+    restart: always
+
+  tests:
+    build: ./backend
+    command: sh -c "PYTHONPATH=/app pytest backend/tests/ --cov=backend --cov-report html"
+    env_file:
+      - .env
+    depends_on:
+      backend:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    networks:
+      - app_network
+    environment:
+      - PYTHONPATH=/app
+
+networks:
+  app_network:
+    driver: bridge
+
+volumes:
+  logs:
