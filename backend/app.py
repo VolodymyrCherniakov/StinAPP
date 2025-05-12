@@ -198,64 +198,44 @@ def send_recommendations():
         "celkem_v_cache": len(global_stock_cache)
     })
 
+
 @app.route('/api/news', methods=['POST'])
-def process_news():
+def fetch_and_filter_news():
     try:
-        data = request.get_json()
-        api_url = data.get("api_url")
-        min_rating_for_sell = int(data.get("min_rating_for_sell", -5))
+        body = request.get_json()
+        api_url = body.get('api_url')
+        min_rating = body.get('min_rating_for_sell', 0)
 
         if not api_url:
-            return jsonify({"error": "Chybí api_url"}), 400
+            return jsonify({'error': 'Chybí api_url'}), 400
 
-        # 1. Získání dat ze zadaného API (např. /news)
-        news_response = requests.get(api_url)
-        news_response.raise_for_status()
-        news_data = news_response.json()
+        # Načtení zpráv z externího API
+        response = requests.get(api_url)
+        if response.status_code != 200:
+            return jsonify({'error': 'Nepodařilo se stáhnout data ze zadané adresy'}), 500
 
-        if not isinstance(news_data, list):
-            return jsonify({"error": "Zprávy musí být seznam"}), 400
+        all_news = response.json()
 
-        # 2. Zpracování dat a výpočet sell
-        processed = []
-        for item in news_data:
-            try:
-                name = item.get("name")
-                date = item.get("date")
-                rating = int(item.get("rating"))
-
-                if name is None or date is None:
-                    continue
-
-                sell = 1 if rating <= min_rating_for_sell else 0
-
-                processed.append({
-                    "name": name,
-                    "date": date,
-                    "rating": rating,
-                    "sell": sell
-                })
-            except Exception as e:
-                logger.warning(f"Chyba při zpracování položky: {e}")
+        # Filtrování a označování
+        filtered = []
+        for item in all_news:
+            rating = item.get('rating')
+            if rating is None:
                 continue
 
-        # 3. Odeslání výsledku zpět do systému zpráv
-        recommend_url = "https://news-production-257a.up.railway.app/recommend-sell"
-        response = requests.post(recommend_url, json=processed)
-        response.raise_for_status()
+            new_item = {
+                'name': item.get('name'),
+                'date': item.get('date'),
+                'rating': rating,
+                'sell': 1 if rating < min_rating else 0
+            }
+            filtered.append(new_item)
 
-        return jsonify({
-            "odeslano_na": recommend_url,
-            "pocet": len(processed),
-            "data": processed
-        })
+        return jsonify({'data': filtered})
 
-    except requests.exceptions.RequestException as re:
-        logger.error(f"Chyba při komunikaci s API: {re}")
-        return jsonify({"error": "Nelze kontaktovat vzdálené API"}), 500
     except Exception as e:
-        logger.error(f"Chyba v /api/news/: {e}")
-        return jsonify({"error": "Interní chyba serveru"}), 500
+        print('Chyba:', e)
+        return jsonify({'error': 'Došlo k chybě při zpracování'}), 500
 
 
 
