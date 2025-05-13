@@ -1,86 +1,259 @@
+import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-import requests
 import logging
 import os
 from dotenv import load_dotenv
+from tiingo import TiingoClient
 from datetime import datetime, timedelta
+from threading import Lock
+import atexit
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 
-# Load API key from .env file
+# Load API key
 load_dotenv()
 API_KEY = os.getenv('API_KEY')
 
+# Configure Tiingo
+client = TiingoClient({'api_key': API_KEY, 'session': True})
+
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+CORS(app)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Alpha Vantage API URL
-ALPHA_VANTAGE_URL = "https://www.alphavantage.co/query"
+TICKER_NAMES = {
+    "AAPL": "Apple Inc.",
+    "MSFT": "Microsoft Corporation",
+    "GOOGL": "Alphabet Inc.",
+    "AMZN": "Amazon.com, Inc.",
+    "TSLA": "Tesla, Inc.",
+    "META": "Meta Platforms, Inc.",
+    "NVDA": "NVIDIA Corporation",
+    "JPM": "JPMorgan Chase & Co.",
+    "V": "Visa Inc.",
+    "WMT": "Walmart Inc.",
+    "DIS": "The Walt Disney Company",
+    "NFLX": "Netflix, Inc.",
+    "PYPL": "PayPal Holdings, Inc.",
+    "KO": "The Coca-Cola Company",
+    "PEP": "PepsiCo, Inc.",
+    "INTC": "Intel Corporation",
+    "CSCO": "Cisco Systems, Inc.",
+    "ORCL": "Oracle Corporation",
+    "CRM": "Salesforce, Inc.",
+    "BA": "The Boeing Company",
+    "NKE": "Nike, Inc.",
+    "COST": "Costco Wholesale Corporation",
+    "ABNB": "Airbnb, Inc.",
+    "ADBE": "Adobe Inc.",
+    "AMD": "Advanced Micro Devices, Inc.",
+    "GE": "General Electric Company",
+    "T": "AT&T Inc.",
+    "XOM": "Exxon Mobil Corporation",
+    "CVX": "Chevron Corporation",
+    "WFC": "Wells Fargo & Company",
+    "BAC": "Bank of America Corporation",
+    "GS": "The Goldman Sachs Group, Inc.",
+    "LMT": "Lockheed Martin Corporation",
+    "CAT": "Caterpillar Inc.",
+    "IBM": "International Business Machines Corporation",
+    "MCD": "McDonald's Corporation",
+    "MMM": "3M Company",
+    "AXP": "American Express Company",
+    "HON": "Honeywell International Inc.",
+    "SBUX": "Starbucks Corporation",
+    "GM": "General Motors Company",
+    "F": "Ford Motor Company",
+    "PFE": "Pfizer Inc.",
+    "JNJ": "Johnson & Johnson",
+    "MRK": "Merck & Co., Inc.",
+    "TMO": "Thermo Fisher Scientific Inc.",
+    "LLY": "Eli Lilly and Company",
+    "UNH": "UnitedHealth Group Incorporated",
+    "BMY": "Bristol-Myers Squibb Company"
+}
 
-# Seznam 20 populárních tickerů jako výchozí hodnota
-DEFAULT_TICKERS = [
-    'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA',
-    'META', 'NVDA', 'JPM', 'V', 'WMT',
-    'DIS', 'NFLX', 'PYPL', 'KO', 'PEP',
-    'INTC', 'AMD', 'CSCO', 'IBM', 'ORCL'
-]
+global_stock_cache = {}
+cache_lock = Lock()
 
-def declined_last_3_days(time_series, dates):
-    """Check if the stock declined in the last 3 days"""
-    return all(
-        float(time_series[dates[i]]['4. close']) < float(time_series[dates[i + 1]]['4. close'])
-        for i in range(3)
-    )
+def declined_last_3_days(prices):
+    return bool(all(prices[i]['close'] < prices[i + 1]['close'] for i in range(3)))
 
-def more_than_two_declines_in_last_5_days(time_series, dates):
-    """Check if the stock had more than two declines in the last 5 days"""
-    return sum(
-        float(time_series[dates[i]]['4. close']) < float(time_series[dates[i + 1]]['4. close'])
-        for i in range(5)
-    ) > 2
+def more_than_two_declines_in_last_5_days(prices):
+    return bool(sum(prices[i]['close'] < prices[i + 1]['close'] for i in range(5)) > 2)
 
-def get_stock_data(ticker):
-    """Retrieve stock data from Alpha Vantage API"""
-    params = {
-        'function': 'TIME_SERIES_DAILY',
-        'symbol': ticker,
-        'apikey': API_KEY
-    }
+def get_stock_entry(ticker, use_cache_only=False, force_refresh=False):
+    with cache_lock:
+        if ticker in global_stock_cache and not force_refresh:
+            return global_stock_cache[ticker]
+        elif use_cache_only:
+            return {"error": f"Data pro {ticker} nejsou v cache."}
+
     try:
-        response = requests.get(ALPHA_VANTAGE_URL, params=params)
-        response.raise_for_status()  # Raise an exception for bad status codes
-        data = response.json()
-        if 'Time Series (Daily)' in data:
-            return data['Time Series (Daily)']
-        else:
-            logger.warning(f"No data available for ticker: {ticker}")
-            return {"error": f"Data nejsou dostupná pro ticker {ticker}."}
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Failed to fetch data for {ticker}: {str(e)}")
-        return {"error": "Nepodařilo se získat data."}
+        end_date = datetime.today()
+        start_date = end_date - timedelta(days=10)
+        historical_prices = client.get_dataframe(ticker, startDate=start_date.strftime('%Y-%m-%d'), endDate=end_date.strftime('%Y-%m-%d'))
+
+        if historical_prices.empty or len(historical_prices) < 5:
+            return {"error": f"Nedostatek dat pro {ticker}"}
+
+        latest_data = historical_prices.sort_index(ascending=False).head(6)
+        prices = [{"date": date.strftime('%Y-%m-%d'), "close": row['close']} for date, row in latest_data.iterrows()]
+
+        result_entry = {
+            "company_name": TICKER_NAMES.get(ticker, 'Neznámá společnost'),
+            "declined_last_3_days": declined_last_3_days(prices),
+            "more_than_2_declines_last_5_days": more_than_two_declines_in_last_5_days(prices),
+            "latest_close": float(prices[0]['close']),
+            "history": prices
+        }
+
+        with cache_lock:
+            global_stock_cache[ticker] = result_entry
+
+        return result_entry
+
+    except requests.exceptions.HTTPError as http_err:
+        if http_err.response.status_code == 404:
+            return {"error": f"Ticker '{ticker}' nebyl nalezen."}
+        return {"error": f"HTTP chyba: {str(http_err)}"}
+    except Exception as e:
+        logger.error(f"Chyba při načítání {ticker}: {e}")
+        return {"error": "Nastala chyba při získávání dat."}
+
+def scheduled_stock_fetch():
+    logger.info("Spouštím aktualizaci tickerů v cache...")
+    with cache_lock:
+        tickers_to_update = list(global_stock_cache.keys())
+
+    for ticker in tickers_to_update:
+        try:
+            updated_entry = get_stock_entry(ticker, force_refresh=True)
+            with cache_lock:
+                global_stock_cache[ticker] = updated_entry
+            logger.info(f"Aktualizován: {ticker}")
+        except Exception as e:
+            logger.warning(f"Chyba při aktualizaci {ticker}: {e}")
+
 
 @app.route('/api/stocks', methods=['GET'])
 def get_stocks():
-    """Retrieve data for user-defined or default stock tickers"""
-    tickers = request.args.getlist('tickers')  # Get list of tickers from query params
-    if not tickers:
-        # Použij výchozí seznam 20 tickerů, pokud nejsou zadány žádné
-        tickers = DEFAULT_TICKERS
-        logger.info("No tickers provided, using default list of 20 tickers")
+    with cache_lock:
+        return jsonify(global_stock_cache)
 
-    stock_data = {}
-    for ticker in tickers:
-        stock_data[ticker] = get_stock_data(ticker)
+@app.route('/api/stocks/add_and_check', methods=['POST'])
+def add_and_check_ticker():
+    data = request.get_json()
+    ticker = data.get("ticker", "").upper()
+    if not ticker:
+        return jsonify({"error": "Ticker není zadán"}), 400
 
-    return jsonify(stock_data)
+    entry = get_stock_entry(ticker)
+    if "error" in entry:
+        return jsonify({"error": entry["error"]}), 400
+
+    with cache_lock:
+        global_stock_cache[ticker] = entry
+
+    return jsonify({ticker: entry})
+
+@app.route('/api/stocks/remove', methods=['POST'])
+def remove_ticker():
+    data = request.get_json()
+    ticker = data.get("ticker", "").upper()
+
+    if not ticker:
+        return jsonify({"error": "Ticker není zadán"}), 400
+
+    with cache_lock:
+        if ticker in global_stock_cache:
+            del global_stock_cache[ticker]
+            return jsonify({"removed": ticker}), 200
+        else:
+            return jsonify({"error": "Ticker nebyl nalezen v cache"}), 404
+
+
+
+
+@app.route('/api/stocks/recommend', methods=['POST'])
+def send_recommendations():
+    with cache_lock:
+        filtered = {
+            ticker: entry for ticker, entry in global_stock_cache.items()
+            if not entry.get("declined_last_3_days") and not entry.get("more_than_2_declines_last_5_days")
+        }
+
+    if filtered:
+        try:
+            response = requests.post("https://news-production-257a.up.railway.app/recommendations", json=filtered)
+            response.raise_for_status()
+        except Exception as e:
+            logger.error(f"Chyba při odesílání doporučení: {e}")
+            return jsonify({"error": "Nepodařilo se odeslat doporučení"}), 500
+
+    return jsonify({
+        "odeslano": list(filtered.keys()),
+        "celkem_v_cache": len(global_stock_cache)
+    })
+
+
+@app.route('/api/news', methods=['POST'])
+def fetch_and_filter_news():
+    try:
+        body = request.get_json()
+        api_url = body.get('api_url')
+        min_rating = body.get('min_rating_for_sell', 0)
+
+        if not api_url:
+            return jsonify({'error': 'Chybí api_url'}), 400
+
+        # Načtení zpráv z externího API
+        response = requests.get(api_url)
+        if response.status_code != 200:
+            return jsonify({'error': 'Nepodařilo se stáhnout data ze zadané adresy'}), 500
+
+        all_news = response.json()
+
+        # Filtrování a označování
+        filtered = []
+        for item in all_news:
+            rating = item.get('rating')
+            if rating is None:
+                continue
+
+            new_item = {
+                'name': item.get('name'),
+                'date': item.get('date'),
+                'rating': rating,
+                'sell': 1 if rating < min_rating else 0
+            }
+            filtered.append(new_item)
+
+        return jsonify({'data': filtered})
+
+    except Exception as e:
+        print('Chyba:', e)
+        return jsonify({'error': 'Došlo k chybě při zpracování'}), 500
+
+
 
 @app.route('/api/hello', methods=['GET'])
 def hello_world():
-    """Simple hello endpoint for testing"""
-    app.logger.info("HelloWorld endpoint was called")
     return jsonify({"message": "Hello from Docker!"})
 
+@app.errorhandler(Exception)
+def handle_exception(e):
+    logger.error(f"Nezachycená výjimka: {e}")
+    return jsonify(error=str(e)), 500
+
+# Scheduler pro obnoveni dat
+scheduler = BackgroundScheduler()
+trigger = CronTrigger(hour='0,6,12,18', minute=0)
+scheduler.add_job(func=scheduled_stock_fetch, trigger=trigger)
+scheduler.start()
+atexit.register(lambda: scheduler.shutdown())
+
 if __name__ == '__main__':
-    # Configure basic logging
-    logging.basicConfig(level=logging.INFO)
     app.run(host='0.0.0.0', port=8000)
